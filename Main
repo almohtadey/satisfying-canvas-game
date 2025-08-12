@@ -1,0 +1,440 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "framer-motion";
+
+// ----------------------------- //
+// Helpers
+// ----------------------------- //
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+function useRaf(callback) {
+  const cbRef = useRef(callback);
+  cbRef.current = callback;
+  useEffect(() => {
+    let rafId;
+    const loop = (t) => {
+      cbRef.current?.(t);
+      rafId = requestAnimationFrame(loop);
+    };
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
+}
+
+function useCanvasSize(ref) {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const resize = () => {
+      const ratio = window.devicePixelRatio || 1;
+      const { clientWidth, clientHeight } = el;
+      el.width = Math.max(1, Math.floor(clientWidth * ratio));
+      el.height = Math.max(1, Math.floor(clientHeight * ratio));
+      setSize({ w: el.width, h: el.height });
+    };
+    resize();
+    const ro = new ResizeObserver(resize);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return size;
+}
+
+// ----------------------------- //
+// Squish Ball (Canvas)
+// ----------------------------- //
+function SquishBallCanvas() {
+  const canvasRef = useRef(null);
+  const pointerRef = useRef({ down: false, x: 0, y: 0, inside: false });
+  const { w, h } = useCanvasSize(canvasRef);
+
+  const stateRef = useRef({
+    x: 0,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    tx: 0,
+    ty: 0,
+    r: 60,
+    scaleX: 1,
+    scaleY: 1,
+    vsx: 0,
+    vsy: 0,
+    t: 0,
+  });
+
+  useEffect(() => {
+    // center on first measure
+    if (!w || !h) return;
+    const s = stateRef.current;
+    s.x = s.tx = w / 2;
+    s.y = s.ty = h / 2;
+  }, [w, h]);
+
+  // pointer handlers
+  const onPointerDown = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (window.devicePixelRatio || 1);
+    const y = (e.clientY - rect.top) * (window.devicePixelRatio || 1);
+    const s = stateRef.current;
+    const dx = x - s.x;
+    const dy = y - s.y;
+    const dist = Math.hypot(dx, dy);
+    pointerRef.current.down = dist <= s.r * 1.2;
+    pointerRef.current.x = x;
+    pointerRef.current.y = y;
+    pointerRef.current.inside = dist <= s.r * 1.2;
+    if (pointerRef.current.down) {
+      s.tx = x;
+      s.ty = y;
+    }
+  };
+  const onPointerMove = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (window.devicePixelRatio || 1);
+    const y = (e.clientY - rect.top) * (window.devicePixelRatio || 1);
+    pointerRef.current.x = x;
+    pointerRef.current.y = y;
+    if (pointerRef.current.down) {
+      stateRef.current.tx = x;
+      stateRef.current.ty = y;
+    }
+  };
+  const end = () => {
+    pointerRef.current.down = false;
+    // let it relax back to center
+    const s = stateRef.current;
+    s.tx = w / 2;
+    s.ty = h / 2;
+  };
+
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    c.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    return () => {
+      c.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w, h]);
+
+  useRaf(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    const s = stateRef.current;
+    s.t += 1;
+
+    // physics
+    const k = 0.12; // spring strength
+    const d = 0.86; // damping
+    s.vx = (s.vx + (s.tx - s.x) * k) * d;
+    s.vy = (s.vy + (s.ty - s.y) * k) * d;
+    s.x += s.vx;
+    s.y += s.vy;
+
+    // squash & stretch based on speed or press
+    const speed = Math.hypot(s.vx, s.vy);
+    const maxSquash = 0.33;
+    const pressFactor = pointerRef.current.down ? 0.22 : 0;
+    const moveSquash = clamp(speed / 900, 0, maxSquash);
+
+    const dir = Math.atan2(s.vy, s.vx);
+    const squash = clamp(moveSquash + pressFactor, 0, maxSquash);
+
+    const targetScaleX = 1 + squash;
+    const targetScaleY = 1 - squash;
+
+    // spring scales
+    const ks = 0.25;
+    const ds = 0.8;
+    s.vsx = (s.vsx + (targetScaleX - s.scaleX) * ks) * ds;
+    s.vsy = (s.vsy + (targetScaleY - s.scaleY) * ks) * ds;
+    s.scaleX += s.vsx;
+    s.scaleY += s.vsy;
+
+    // clear
+    ctx.save();
+    ctx.scale(1, 1);
+    ctx.clearRect(0, 0, c.width, c.height);
+
+    // background gradient
+    const bg = ctx.createLinearGradient(0, 0, 0, c.height);
+    bg.addColorStop(0, "#111827");
+    bg.addColorStop(1, "#0b1220");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, c.width, c.height);
+
+    // soft vignette
+    const vignette = ctx.createRadialGradient(
+      c.width / 2,
+      c.height / 2,
+      Math.min(c.width, c.height) * 0.2,
+      c.width / 2,
+      c.height / 2,
+      Math.max(c.width, c.height) * 0.7
+    );
+    vignette.addColorStop(0, "rgba(255,255,255,0)");
+    vignette.addColorStop(1, "rgba(0,0,0,0.25)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, c.width, c.height);
+
+    // shadow
+    ctx.save();
+    ctx.translate(s.x, s.y + s.r * 1.2);
+    ctx.rotate(dir);
+    ctx.scale(s.scaleX, s.scaleY);
+    const shGrad = ctx.createRadialGradient(0, 0, s.r * 0.2, 0, 0, s.r * 1.4);
+    shGrad.addColorStop(0, "rgba(0,0,0,0.3)");
+    shGrad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = shGrad;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s.r * 1.2, s.r * 0.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // ball
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(dir);
+    ctx.scale(s.scaleX, s.scaleY);
+
+    const grad = ctx.createRadialGradient(-s.r * 0.3, -s.r * 0.35, s.r * 0.3, 0, 0, s.r * 1.2);
+    grad.addColorStop(0, "#6ee7b7"); // emerald-300
+    grad.addColorStop(0.6, "#10b981"); // emerald-500
+    grad.addColorStop(1, "#065f46"); // emerald-900
+    ctx.fillStyle = grad;
+
+    ctx.beginPath();
+    ctx.arc(0, 0, s.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // glossy highlight
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.ellipse(-s.r * 0.35, -s.r * 0.45, s.r * 0.5, s.r * 0.3, -0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.restore();
+
+    // hint text
+    ctx.font = `${Math.max(14, Math.floor(c.width / 22))}px ui-sans-serif, system-ui`;
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      pointerRef.current.down ? "Drag me around" : "Press & drag the squishy ball",
+      c.width / 2,
+      c.height - 28 * (window.devicePixelRatio || 1)
+    );
+
+    ctx.restore();
+  });
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="w-full h-72 md:h-80 rounded-2xl shadow-inner"
+      style={{ touchAction: "none", background: "#0b1220" }}
+    />
+  );
+}
+
+// ----------------------------- //
+// Ripple Pool (Canvas)
+// ----------------------------- //
+function RipplePoolCanvas() {
+  const canvasRef = useRef(null);
+  const { w, h } = useCanvasSize(canvasRef);
+  const ripplesRef = useRef([]);
+
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const add = (x, y) => {
+      const ratio = window.devicePixelRatio || 1;
+      ripplesRef.current.push({ x: x * ratio, y: y * ratio, r: 0, a: 1 });
+    };
+    const onDown = (e) => {
+      const rect = c.getBoundingClientRect();
+      add(e.clientX - rect.left, e.clientY - rect.top);
+    };
+    c.addEventListener("pointerdown", onDown);
+    return () => c.removeEventListener("pointerdown", onDown);
+  }, []);
+
+  useRaf(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    ctx.clearRect(0, 0, c.width, c.height);
+
+    // background
+    const grad = ctx.createLinearGradient(0, 0, c.width, c.height);
+    grad.addColorStop(0, "#0f172a");
+    grad.addColorStop(1, "#1f2937");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, c.width, c.height);
+
+    // evolve ripples
+    ripplesRef.current.forEach((r) => {
+      r.r += 6;
+      r.a *= 0.96;
+    });
+    ripplesRef.current = ripplesRef.current.filter((r) => r.a > 0.02);
+
+    // draw ripples
+    for (const r of ripplesRef.current) {
+      const ring = ctx.createRadialGradient(r.x, r.y, r.r * 0.7, r.x, r.y, r.r);
+      ring.addColorStop(0, `rgba(255,255,255,${0})`);
+      ring.addColorStop(1, `rgba(255,255,255,${r.a})`);
+      ctx.strokeStyle = `rgba(255,255,255,${r.a})`;
+      ctx.lineWidth = 2 * (window.devicePixelRatio || 1);
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = ring;
+      ctx.fill();
+    }
+
+    // label
+    ctx.font = `${Math.max(14, Math.floor(c.width / 22))}px ui-sans-serif, system-ui`;
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.textAlign = "center";
+    ctx.fillText("Tap to make ripples", c.width / 2, c.height - 28 * (window.devicePixelRatio || 1));
+  });
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="w-full h-64 md:h-72 rounded-2xl shadow-inner"
+      style={{ touchAction: "none" }}
+    />
+  );
+}
+
+// ----------------------------- //
+// Satisfy Button (bounce + glow)
+// ----------------------------- //
+function SatisfyButton() {
+  const [count, setCount] = useState(0);
+  return (
+    <div className="flex flex-col items-center justify-center gap-4 p-6">
+      <motion.button
+        whileTap={{ scale: 0.9 }}
+        animate={{
+          scale: [1, 1.06, 1],
+          boxShadow: [
+            "0 20px 50px rgba(16,185,129,0.15)",
+            "0 25px 60px rgba(16,185,129,0.35)",
+            "0 20px 50px rgba(16,185,129,0.15)",
+          ],
+        }}
+        transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
+        onClick={() => setCount((v) => v + 1)}
+        className="relative rounded-full px-10 py-6 text-xl font-semibold text-white bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 focus:outline-none focus:ring-4 focus:ring-emerald-400/40"
+      >
+        Click Me
+        <span className="ml-3 text-emerald-200/80 text-lg">{count}</span>
+        <span className="absolute inset-0 rounded-full ring-8 ring-emerald-400/10" />
+      </motion.button>
+      <p className="text-sm text-emerald-100/80">Satisfying bounce + glow. Counter goes up.</p>
+    </div>
+  );
+}
+
+// ----------------------------- //
+// Card wrapper
+// ----------------------------- //
+function Card({ title, subtitle, children }) {
+  return (
+    <div className="rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 border border-white/10 shadow-xl overflow-hidden">
+      <div className="px-5 pt-4 pb-2">
+        <h3 className="text-white text-lg font-semibold tracking-wide">{title}</h3>
+        {subtitle && <p className="text-slate-300/70 text-sm mt-1">{subtitle}</p>}
+      </div>
+      <div className="p-4">{children}</div>
+    </div>
+  );
+}
+
+// ----------------------------- //
+// Made By Badge
+function MadeByBadge() {
+  return (
+    <motion.div
+      className="relative inline-flex items-center gap-2 px-4 py-2 rounded-full ring-1 ring-white/20 shadow-lg"
+      style={{
+        backgroundImage: 'linear-gradient(90deg, rgba(244,114,182,0.2), rgba(96,165,250,0.2), rgba(52,211,153,0.2), rgba(245,158,11,0.2))',
+        backgroundSize: '300% 300%'
+      }}
+      animate={{ backgroundPosition: ['0% 50%', '100% 50%', '0% 50%'] }}
+      transition={{ duration: 10, repeat: Infinity, ease: 'linear' }}
+    >
+      <motion.span
+        className="absolute inset-0 -z-10 blur-xl rounded-full"
+        style={{
+          background: 'conic-gradient(from 0deg at 50% 50%, #22d3ee, #f472b6, #f59e0b, #a78bfa, #22d3ee)'
+        }}
+        animate={{ rotate: 360 }}
+        transition={{ duration: 16, repeat: Infinity, ease: 'linear' }}
+      />
+      <span className="text-xs text-white/80">Made by</span>
+      <motion.span
+        className="text-sm font-bold bg-clip-text text-transparent"
+        style={{
+          backgroundImage: 'linear-gradient(90deg, #f472b6, #60a5fa, #34d399, #f59e0b, #a78bfa, #f472b6)',
+          backgroundSize: '300% 300%'
+        }}
+        animate={{ backgroundPosition: ['0% 50%', '100% 50%', '0% 50%'] }}
+        transition={{ duration: 8, repeat: Infinity, ease: 'linear' }}
+      >
+        Almohtadey Metwaly
+      </motion.span>
+    </motion.div>
+  );
+}
+
+// ----------------------------- //
+// Main Export
+// ----------------------------- //
+export default function SatisfyingPlayground() {
+  return (
+    <div className="min-h-screen w-full bg-gradient-to-br from-slate-900 via-slate-950 to-black text-slate-100 p-6 md:p-10">
+      <div className="mx-auto max-w-6xl">
+        <header className="mb-8 flex items-start justify-between gap-4 flex-wrap">
+  <div>
+    <h1 className="text-3xl md:text-4xl font-bold tracking-tight">Satisfying Canvas Playground</h1>
+    <p className="mt-2 text-slate-300/80 max-w-2xl">A cozy set of little, tactile toys — like those oddly satisfying videos. Press, drag, tap, and click. ✨</p>
+  </div>
+  <MadeByBadge />
+</header>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <Card title="Squish Ball" subtitle="Press & drag; it squashes and stretches with soft physics.">
+            <SquishBallCanvas />
+          </Card>
+
+          <Card title="Ripple Pool" subtitle="Tap anywhere to spawn silky ripples.">
+            <RipplePoolCanvas />
+          </Card>
+
+          <Card title="Bouncy Button" subtitle="Click for a buoyant bounce + glow.">
+            <SatisfyButton />
+          </Card>
+        </div>
+
+        <footer className="mt-10 text-xs text-slate-400/70">
+          Tip: Works with mouse or touch. Try long presses and quick flicks!
+        </footer>
+      </div>
+    </div>
+  );
+}
